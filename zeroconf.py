@@ -46,11 +46,6 @@ __all__ = [
     "Error", "InterfaceChoice", "ServiceStateChange",
 ]
 
-if sys.version_info <= (3, 3):
-    raise ImportError('''
-Python version > 3.3 required for python-zeroconf.
-If you need support for Python 2 or Python 3.3 please use version 19.1
-    ''')
 
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
@@ -69,9 +64,10 @@ _BROWSER_TIME = 500
 # Some DNS constants
 
 _MDNS_ADDR = '224.0.0.251'
+_MDNS_ADDR_IPV6 = 'ff02::fb'
 _MDNS_PORT = 5353
 _DNS_PORT = 53
-_DNS_TTL = 120  # two minutes default TTL as recommended by RFC6762
+_DNS_TTL = 60 * 60  # one hour default TTL
 
 _MAX_MSG_TYPICAL = 1460  # unused
 _MAX_MSG_ABSOLUTE = 8966
@@ -1254,8 +1250,7 @@ class ServiceBrowser(threading.Thread):
     remove_service() methods called when this browser
     discovers changes in the services availability."""
 
-    def __init__(self, zc, type_, handlers=None, listener=None,
-                 addr=_MDNS_ADDR, port=_MDNS_PORT, delay=_BROWSER_TIME):
+    def __init__(self, zc, type_, handlers=None, listener=None):
         """Creates a browser for a specific type"""
         assert handlers or listener, 'You need to specify at least one handler'
         if not type_.endswith(service_type_name(type_)):
@@ -1265,12 +1260,9 @@ class ServiceBrowser(threading.Thread):
         self.daemon = True
         self.zc = zc
         self.type = type_
-        self.addr = addr
-        self.port = port
-        self.multicast = (self.addr == _MDNS_ADDR)
         self.services = {}
         self.next_time = current_time_millis()
-        self.delay = delay
+        self.delay = _BROWSER_TIME
         self._handlers_to_call = []
 
         self._service_state_changed = Signal()
@@ -1354,13 +1346,13 @@ class ServiceBrowser(threading.Thread):
                 return
             now = current_time_millis()
             if self.next_time <= now:
-                out = DNSOutgoing(_FLAGS_QR_QUERY, multicast=self.multicast)
+                out = DNSOutgoing(_FLAGS_QR_QUERY)
                 out.add_question(DNSQuestion(self.type, _TYPE_PTR, _CLASS_IN))
                 for record in self.services.values():
                     if not record.is_stale(now):
                         out.add_answer_at_time(record, now)
 
-                self.zc.send(out, addr=self.addr, port=self.port)
+                self.zc.send(out)
                 self.next_time = now + self.delay
                 self.delay = min(20 * 1000, self.delay * 2)
 
@@ -1626,16 +1618,38 @@ def get_all_addresses(address_family):
     ))
 
 
-def normalize_interface_choice(choice, address_family):
-    if choice is InterfaceChoice.Default:
+def normalize_interface_choice(choice, address_family, interface_name):
+    if choice is InterfaceChoice.Default and address_family is socket.AF_INET:
         choice = ['0.0.0.0']
-    elif choice is InterfaceChoice.All:
+    elif choice is InterfaceChoice.All and address_family is socket.AF_INET:
         choice = get_all_addresses(address_family)
+    elif address_family is socket.AF_INET6: #IPv6 
+        if choice is InterfaceChoice.Default or choice is InterfaceChoice.All:
+            #Get the ip of the interface 
+            ip6_addr =  netifaces.ifaddresses(interface_name)[address_family][0]['addr']
+            ip6_addr = ip6_addr.split("%")[0]
+            return [ip6_addr]
+        else: 
+            return choice
     return choice
 
 
-def new_socket(port=_MDNS_PORT):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def new_socket(interface_number=None):
+    #Default is IPv4
+    address_family = socket.AF_INET
+
+    intf = None #The interface used to transmit data
+
+    if interface_number is None: 
+        #No ipv6 interface given. Stay in ipv4 
+        intf = socket.gethostbyname(socket.gethostname())
+    else: #IPv6 
+        intf = int(interface_number)
+        address_family = socket.AF_INET6
+
+    #Create socket 
+    s = socket.socket(address_family, socket.SOCK_DGRAM)
+
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     # SO_REUSEADDR should be equivalent to SO_REUSEPORT for
@@ -1657,15 +1671,21 @@ def new_socket(port=_MDNS_PORT):
             if not err.errno == errno.ENOPROTOOPT:
                 raise
 
-    if port is _MDNS_PORT:
-        # OpenBSD needs the ttl and loop values for the IP_MULTICAST_TTL and
-        # IP_MULTICAST_LOOP socket options as an unsigned char.
+
+    # OpenBSD needs the ttl and loop values for the IP_MULTICAST_TTL and
+    # IP_MULTICAST_LOOP socket options as an unsigned char.
+    if address_family is socket.AF_INET: 
         ttl = struct.pack(b'B', 255)
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
         loop = struct.pack(b'B', 1)
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, loop)
+    
+    else: #IPv6
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
 
-    s.bind(('', port))
+    #Bind the Socket
+    s.bind(('', _MDNS_PORT))
     return s
 
 
@@ -1684,58 +1704,68 @@ class Zeroconf(QuietLogger):
     def __init__(
         self,
         interfaces=InterfaceChoice.All,
-        unicast=False
+        ipv6_interface_name=None,
     ):
         """Creates an instance of the Zeroconf class, establishing
         multicast communications, listening and reaping threads.
 
         :type interfaces: :class:`InterfaceChoice` or sequence of ip addresses
+        :param ipv6_interface_name: string defining the name of the IPv6 interface that should be used. None if IPv4 should be used
         """
         # hook for threads
         self._GLOBAL_DONE = False
-        self.unicast = unicast
 
-        if not unicast:
+        if ipv6_interface_name is None: #IPv4
             self._listen_socket = new_socket()
-        interfaces = normalize_interface_choice(interfaces, socket.AF_INET)
+            self.address_family = socket.AF_INET
+        else: #IPv6
+            self.if_index = socket.if_nametoindex('awdl0')
+            self._listen_socket = new_socket(interface_number=self.if_index)
+            self.address_family = socket.AF_INET6
+            
+        interfaces = normalize_interface_choice(interfaces, self.address_family, ipv6_interface_name)
+
+        print("Interfaces", interfaces)
 
         self._respond_sockets = []
 
         for i in interfaces:
-            if not unicast:
-                log.debug('Adding %r to multicast group', i)
-                try:
-                    _value = socket.inet_aton(_MDNS_ADDR) + socket.inet_aton(i)
+            log.debug('Adding %r to multicast group', i)
+            try:
+                if self.address_family is socket.AF_INET:
                     self._listen_socket.setsockopt(
-                        socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, _value)
-                except socket.error as e:
-                    _errno = get_errno(e)
-                    if _errno == errno.EADDRINUSE:
-                        log.info(
-                            'Address in use when adding %s to multicast group, '
-                            'it is expected to happen on some systems', i,
-                        )
-                    elif _errno == errno.EADDRNOTAVAIL:
-                        log.info(
-                            'Address not available when adding %s to multicast '
-                            'group, it is expected to happen on some systems', i,
-                        )
-                        continue
-                    elif _errno == errno.EINVAL:
-                        log.info(
-                            'Interface of %s does not support multicast, '
-                            'it is expected in WSL', i
-                        )
-                        continue
+                        socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                        socket.inet_aton(_MDNS_ADDR) + socket.inet_aton(i))
+                else: #IPv6 
+                    self.ifn = struct.pack("I", self.if_index)
+                    group = socket.inet_pton(socket.AF_INET6,_MDNS_ADDR_IPV6) + self.ifn
+                    self._listen_socket.setsockopt(
+                        socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, group
+                    )
 
-                    else:
-                        raise
+            except socket.error as e:
+                if get_errno(e) == errno.EADDRINUSE:
+                    log.info(
+                        'Address in use when adding %s to multicast group, '
+                        'it is expected to happen on some systems', i,
+                    )
+                elif get_errno(e) == errno.EADDRNOTAVAIL:
+                    log.info(
+                        'Address not available when adding %s to multicast '
+                        'group, it is expected to happen on some systems', i,
+                    )
+                    continue
+                else:
+                    raise
 
-                respond_socket = new_socket()
+            respond_socket = new_socket()
+            if self.address_family is socket.AF_INET:  #IPv4
                 respond_socket.setsockopt(
                     socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(i))
-            else:
-                respond_socket = new_socket(port=0)
+            else: #IPv6 
+                respond_socket.setsockopt(
+                    socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, self.ifn
+                )
 
             self._respond_sockets.append(respond_socket)
 
@@ -1750,11 +1780,7 @@ class Zeroconf(QuietLogger):
 
         self.engine = Engine(self)
         self.listener = Listener(self)
-        if not unicast:
-            self.engine.add_reader(self.listener, self._listen_socket)
-        else:
-            for s in self._respond_sockets:
-                self.engine.add_reader(self.listener, s)
+        self.engine.add_reader(self.listener, self._listen_socket)
         self.reaper = Reaper(self)
 
         self.debug = None
@@ -1805,7 +1831,6 @@ class Zeroconf(QuietLogger):
         of 60 seconds.  Zeroconf will then respond to requests for
         information for that service.  The name of the service may be
         changed if needed to make it unique on the network."""
-        info.ttl = ttl
         self.check_service(info, allow_name_change)
         self.services[info.name.lower()] = info
         if info.type in self.servicetypes:
@@ -1941,7 +1966,7 @@ class Zeroconf(QuietLogger):
             self.debug = out
             out.add_question(DNSQuestion(info.type, _TYPE_PTR, _CLASS_IN))
             out.add_authorative_answer(DNSPointer(
-                info.type, _TYPE_PTR, _CLASS_IN, info.ttl, info.name))
+                info.type, _TYPE_PTR, _CLASS_IN, _DNS_TTL, info.name))
             self.send(out)
             i += 1
             next_time += _CHECK_TIME
@@ -2019,7 +2044,7 @@ class Zeroconf(QuietLogger):
                             out = DNSOutgoing(_FLAGS_QR_RESPONSE | _FLAGS_AA)
                         out.add_answer(msg, DNSPointer(
                             service.type, _TYPE_PTR,
-                            _CLASS_IN, service.ttl, service.name))
+                            _CLASS_IN, _DNS_TTL, service.name))
             else:
                 try:
                     if out is None:
@@ -2032,7 +2057,7 @@ class Zeroconf(QuietLogger):
                                 out.add_answer(msg, DNSAddress(
                                     question.name, _TYPE_A,
                                     _CLASS_IN | _CLASS_UNIQUE,
-                                    service.ttl, service.address))
+                                    _DNS_TTL, service.address))
 
                     service = self.services.get(question.name.lower(), None)
                     if not service:
@@ -2041,16 +2066,16 @@ class Zeroconf(QuietLogger):
                     if question.type in (_TYPE_SRV, _TYPE_ANY):
                         out.add_answer(msg, DNSService(
                             question.name, _TYPE_SRV, _CLASS_IN | _CLASS_UNIQUE,
-                            service.ttl, service.priority, service.weight,
+                            _DNS_TTL, service.priority, service.weight,
                             service.port, service.server))
                     if question.type in (_TYPE_TXT, _TYPE_ANY):
                         out.add_answer(msg, DNSText(
                             question.name, _TYPE_TXT, _CLASS_IN | _CLASS_UNIQUE,
-                            service.ttl, service.text))
+                            _DNS_TTL, service.text))
                     if question.type == _TYPE_SRV:
                         out.add_additional_answer(DNSAddress(
                             service.server, _TYPE_A, _CLASS_IN | _CLASS_UNIQUE,
-                            service.ttl, service.address))
+                            _DNS_TTL, service.address))
                 except Exception:  # TODO stop catching all Exceptions
                     self.log_exception_warning()
 
@@ -2090,12 +2115,8 @@ class Zeroconf(QuietLogger):
             self.unregister_all_services()
 
             # shutdown recv socket and thread
-            if not self.unicast:
-                self.engine.del_reader(self._listen_socket)
-                self._listen_socket.close()
-            else:
-                for s in self._respond_sockets:
-                    self.engine.del_reader(s)
+            self.engine.del_reader(self._listen_socket)
+            self._listen_socket.close()
             self.engine.join()
 
             # shutdown the rest
