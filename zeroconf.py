@@ -47,11 +47,12 @@ __all__ = [
 ]
 
 
+consoleHandler = logging.StreamHandler()
 log = logging.getLogger(__name__)
-log.addHandler(logging.NullHandler())
+log.addHandler(consoleHandler)
 
 if log.level == logging.NOTSET:
-    log.setLevel(logging.WARN)
+    log.setLevel(logging.INFO)
 
 # Some timing constants
 
@@ -1165,9 +1166,12 @@ class Listener(QuietLogger):
 
     def handle_read(self, socket_):
         try:
-            data, (addr, port) = socket_.recvfrom(_MAX_MSG_ABSOLUTE)
-        except Exception:
+            data, addr = socket_.recvfrom(_MAX_MSG_ABSOLUTE)
+            port = addr[1]
+            addr = addr[0]
+        except Exception as exc:
             self.log_exception_warning()
+            print("Exception raised", exc)
             return
 
         log.debug('Received from %r:%r: %r ', addr, port, data)
@@ -1180,13 +1184,20 @@ class Listener(QuietLogger):
         elif msg.is_query():
             # Always multicast responses
             if port == _MDNS_PORT:
-                self.zc.handle_query(msg, _MDNS_ADDR, _MDNS_PORT)
+                if self.zc.address_family is socket.AF_INET6: 
+                    self.zc.handle_query(msg, _MDNS_ADDR_IPV6, _MDNS_PORT)
+                else: 
+                    self.zc.handle_query(msg, _MDNS_ADDR, _MDNS_PORT)
 
             # If it's not a multicast query, reply via unicast
             # and multicast
             elif port == _DNS_PORT:
-                self.zc.handle_query(msg, addr, port)
-                self.zc.handle_query(msg, _MDNS_ADDR, _MDNS_PORT)
+                if self.zc.address_family is socket.AF_INET6: 
+                    self.zc.handle_query(msg, addr, port)
+                    self.zc.handle_query(msg, _MDNS_ADDR_IPV6, _MDNS_PORT)
+                else: 
+                    self.zc.handle_query(msg, addr, port)
+                    self.zc.handle_query(msg, _MDNS_ADDR, _MDNS_PORT)
 
         else:
             self.zc.handle_response(msg)
@@ -1719,7 +1730,7 @@ class Zeroconf(QuietLogger):
             self._listen_socket = new_socket()
             self.address_family = socket.AF_INET
         else: #IPv6
-            self.if_index = socket.if_nametoindex('awdl0')
+            self.if_index = socket.if_nametoindex(ipv6_interface_name)
             self._listen_socket = new_socket(interface_number=self.if_index)
             self.address_family = socket.AF_INET6
             
@@ -1758,11 +1769,13 @@ class Zeroconf(QuietLogger):
                 else:
                     raise
 
-            respond_socket = new_socket()
+            respond_socket = None
             if self.address_family is socket.AF_INET:  #IPv4
+                respond_socket = new_socket()
                 respond_socket.setsockopt(
                     socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(i))
             else: #IPv6 
+                respond_socket = new_socket(self.if_index)
                 respond_socket.setsockopt(
                     socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, self.ifn
                 )
@@ -2083,8 +2096,16 @@ class Zeroconf(QuietLogger):
             out.id = msg.id
             self.send(out, addr, port)
 
-    def send(self, out, addr=_MDNS_ADDR, port=_MDNS_PORT):
+    def send(self, out, addr=None, port=_MDNS_PORT):
         """Sends an outgoing packet."""
+
+        if self.address_family is socket.AF_INET6: 
+            #Wrong address set. Change to ipv6 mdns 
+            addr = (addr or _MDNS_ADDR_IPV6, port, 0, 0,)
+        else: 
+            addr = (addr or _MDNS_ADDR, port,)
+
+
         packet = out.packet()
         if len(packet) > _MAX_MSG_ABSOLUTE:
             self.log_warning_once("Dropping %r over-sized packet (%d bytes) %r",
@@ -2095,7 +2116,7 @@ class Zeroconf(QuietLogger):
             if self._GLOBAL_DONE:
                 return
             try:
-                bytes_sent = s.sendto(packet, 0, (addr, port))
+                bytes_sent = s.sendto(packet, 0, addr)
             except Exception:   # TODO stop catching all Exceptions
                 # on send errors, log the exception and keep going
                 self.log_exception_warning()
@@ -2116,6 +2137,14 @@ class Zeroconf(QuietLogger):
 
             # shutdown recv socket and thread
             self.engine.del_reader(self._listen_socket)
+
+            if self.address_family == socket.AF_INET:
+                self._listen_socket.setsockopt(socket.SOL_IP, socket.IP_DROP_MEMBERSHIP,
+                    socket.inet_aton(_MDNS_ADDR) + socket.inet_aton('0.0.0.0'))
+            else:
+                group = socket.inet_pton(socket.AF_INET6,_MDNS_ADDR_IPV6) + self.ifn
+                self._listen_socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_LEAVE_GROUP,group)
+            
             self._listen_socket.close()
             self.engine.join()
 
@@ -2124,3 +2153,52 @@ class Zeroconf(QuietLogger):
             self.reaper.join()
             for s in self._respond_sockets:
                 s.close()
+
+if __name__=='__main__': 
+    #Run this to setup a simple zeroconf 
+    ifname = 'en0'
+    class MyListener:
+
+        def remove_service(self, zeroconf, type, name):
+            print("Service %s removed" % (name,))
+
+        def add_service(self, zeroconf, type, name):
+            info = zeroconf.get_service_info(type, name)
+            print("Service %s added, service info: %s" % (name, info))
+
+
+    ip6_addr =  netifaces.ifaddresses(ifname)[socket.AF_INET6][0]['addr']
+    ip6_addr = ip6_addr.split("%")[0]
+
+    ip_addr = ip6_addr 
+    # Normal ipv4 
+    ip_addr =  netifaces.ifaddresses(ifname)[socket.AF_INET][0]['addr']
+
+    # zeroconf = Zeroconf(interfaces=[ip6_addr], ipv6_interface_name=ifname)
+    #IPv4
+    zeroconf = Zeroconf(interfaces=[ip_addr])
+    listener = MyListener()
+    browser = ServiceBrowser(zeroconf, "_airdrop._tcp.local.", listener)
+
+    try:
+        input("Press enter to exit...\n\n")
+    finally:
+        zeroconf.close()
+    
+
+    # import random
+    # instance = "{0:0{1}x}".format(random.randint(0, 0xffffffffffff), 12)  # random 6-byte string in base16
+    # service_name = instance + "._airdrop._tcp.local."
+    # import ipaddress
+    # byte_address = ipaddress.IPv6Address(ip6_addr).packed
+
+    # fqdn = socket.gethostname()
+    # hostname = fqdn.split('.')[0]
+
+    # server = hostname + ".local."
+
+    # info = ServiceInfo(
+    #         "_airdrop._tcp.local.", service_name,
+    #         byte_address, 8771, 0, 0, {}, server)
+
+    # zeroconf.register_service(info)
