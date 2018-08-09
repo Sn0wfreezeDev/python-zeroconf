@@ -351,7 +351,7 @@ class DNSEntry:
     def __eq__(self, other):
         """Equality test on name, type, and class"""
         return (isinstance(other, DNSEntry) and
-                self.name == other.name and
+                self.name.lower() == other.name.lower() and
                 self.type == other.type and
                 self.class_ == other.class_)
 
@@ -1481,7 +1481,7 @@ class ServiceInfo:
     def update_record(self, zc, now, record):
         """Updates service information from a DNS record"""
         if record is not None and not record.is_expired(now):
-            if record.type == _TYPE_A:
+            if record.type == _TYPE_A or record.type == _TYPE_AAAA:
                 # if record.name == self.name:
                 if record.name == self.server:
                     self.address = record.address
@@ -1513,11 +1513,17 @@ class ServiceInfo:
             (_TYPE_TXT, _CLASS_IN),
         ]
         if self.server is not None:
-            record_types_for_check_cache.append((_TYPE_A, _CLASS_IN))
+            if zc.address_family is socket.AF_INET:
+                record_types_for_check_cache.append((_TYPE_A, _CLASS_IN))
+            else: #IPv6
+                record_types_for_check_cache.append((_TYPE_AAAA, _CLASS_IN))
         for record_type in record_types_for_check_cache:
             cached = zc.cache.get_by_details(self.name, *record_type)
+            cached_server = zc.cache.get_by_details(self.server.lower(), *record_type)
             if cached:
                 self.update_record(zc, now, cached)
+            if cached_server: 
+                self.update_record(zc, now, cached_server)
 
         if None not in (self.server, self.address, self.text):
             return True
@@ -1645,7 +1651,12 @@ def normalize_interface_choice(choice, address_family, interface_name):
     return choice
 
 
-def new_socket(interface_number=None):
+def new_socket(interface_number=None, interface_name=None):
+    """
+    Create a new socket for a given interface_number. 
+    interface_name and interface_number have to be for the same interface 
+
+    """
     #Default is IPv4
     address_family = socket.AF_INET
 
@@ -1695,6 +1706,9 @@ def new_socket(interface_number=None):
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
 
+    if interface_name is "awdl0":
+        s.setsockopt(socket.SOL_SOCKET, 0x1104, 1)
+
     #Bind the Socket
     s.bind(('', _MDNS_PORT))
     return s
@@ -1731,7 +1745,7 @@ class Zeroconf(QuietLogger):
             self.address_family = socket.AF_INET
         else: #IPv6
             self.if_index = socket.if_nametoindex(ipv6_interface_name)
-            self._listen_socket = new_socket(interface_number=self.if_index)
+            self._listen_socket = new_socket(interface_number=self.if_index, interface_name=ipv6_interface_name)
             self.address_family = socket.AF_INET6
             
         interfaces = normalize_interface_choice(interfaces, self.address_family, ipv6_interface_name)
@@ -2028,6 +2042,7 @@ class Zeroconf(QuietLogger):
                 self.cache.add(record)
 
         for record in msg.answers:
+            # print("\nUpdating record: Key: %s, value:\n %s" % (record.key, record))
             self.update_record(now, record)
 
     def handle_query(self, msg, addr, port):
@@ -2156,15 +2171,8 @@ class Zeroconf(QuietLogger):
 
 if __name__=='__main__': 
     #Run this to setup a simple zeroconf 
-    ifname = 'en0'
-    class MyListener:
-
-        def remove_service(self, zeroconf, type, name):
-            print("Service %s removed" % (name,))
-
-        def add_service(self, zeroconf, type, name):
-            info = zeroconf.get_service_info(type, name)
-            print("Service %s added, service info: %s" % (name, info))
+    ifname = 'awdl0'
+    
 
 
     ip6_addr =  netifaces.ifaddresses(ifname)[socket.AF_INET6][0]['addr']
@@ -2172,18 +2180,28 @@ if __name__=='__main__':
 
     ip_addr = ip6_addr 
     # Normal ipv4 
-    ip_addr =  netifaces.ifaddresses(ifname)[socket.AF_INET][0]['addr']
+    # ip_addr =  netifaces.ifaddresses(ifname)[socket.AF_INET][0]['addr']
 
-    # zeroconf = Zeroconf(interfaces=[ip6_addr], ipv6_interface_name=ifname)
+    z = Zeroconf(interfaces=[ip6_addr], ipv6_interface_name=ifname)
     #IPv4
-    zeroconf = Zeroconf(interfaces=[ip_addr])
+    # zeroconf = Zeroconf(interfaces=[ip_addr])
+
+    class MyListener:
+
+        def remove_service(self, zeroconf, type, name):
+            print("Service %s removed" % (name,))
+
+        def add_service(self, zeroconf, type, name):
+            info = z.get_service_info(type, name)
+            print("Service %s added, service info: %s" % (name, info))
+
     listener = MyListener()
-    browser = ServiceBrowser(zeroconf, "_airdrop._tcp.local.", listener)
+    browser = ServiceBrowser(z, "_airdrop._tcp.local.", listener)
 
     try:
         input("Press enter to exit...\n\n")
     finally:
-        zeroconf.close()
+        z.close()
     
 
     # import random
