@@ -1883,9 +1883,15 @@ class Zeroconf(QuietLogger):
             out.add_answer_at_time(
                 DNSText(info.name, _TYPE_TXT, _CLASS_IN, ttl, info.text), 0)
             if info.address:
-                out.add_answer_at_time(
-                    DNSAddress(info.server, _TYPE_A, _CLASS_IN,
-                               ttl, info.address), 0)
+                if self.address_family == socket.AF_INET:
+                    out.add_answer_at_time(
+                        DNSAddress(info.server, _TYPE_A, _CLASS_IN,
+                                   ttl, info.address), 0)
+                else: #IPv6 
+                    out.add_answer_at_time(
+                        DNSAddress(info.server, _TYPE_AAAA, _CLASS_IN,
+                                   ttl, info.address), 0)
+
             self.send(out)
             i += 1
             next_time += _REGISTER_TIME
@@ -2079,11 +2085,22 @@ class Zeroconf(QuietLogger):
                         out = DNSOutgoing(_FLAGS_QR_RESPONSE | _FLAGS_AA)
 
                     # Answer A record queries for any service addresses we know
+                    # Used in IPv4 
                     if question.type in (_TYPE_A, _TYPE_ANY):
                         for service in self.services.values():
-                            if service.server == question.name.lower():
+                            if service.server.lower() == question.name.lower():
                                 out.add_answer(msg, DNSAddress(
                                     question.name, _TYPE_A,
+                                    _CLASS_IN | _CLASS_UNIQUE,
+                                    _DNS_TTL, service.address))
+                    
+                    #React on query for AAAA record 
+                    # In IPv6 
+                    elif question.type in (_TYPE_AAAA, _TYPE_ANY): #IPv6
+                        for service in self.services.values(): 
+                            if service.server == question.name.lower(): 
+                                out.add_answer(msg, DNSAddress(
+                                    question.name, _TYPE_AAAA,
                                     _CLASS_IN | _CLASS_UNIQUE,
                                     _DNS_TTL, service.address))
 
@@ -2195,8 +2212,21 @@ if __name__=='__main__':
             info = z.get_service_info(type, name)
             print("Service %s added, service info: %s" % (name, info))
 
+
     listener = MyListener()
     browser = ServiceBrowser(z, "_airdrop._tcp.local.", listener)
+
+    #Announce a service 
+    service_name = '910d8e8bf1d9' + "._airdrop._tcp.local."
+    byte_address = b'\xfe\x80\x00\x00\x00\x00\x00\x00(\xb0\xac\xff\xfeq\xee\xd7'
+    port = 8771
+    server = "AirDropPy" + ".local."
+    properties = {b'flags': b'503'}
+    info = ServiceInfo(
+            "_airdrop._tcp.local.", service_name,
+            byte_address, port, 0, 0, properties, server)
+
+    z.register_service(info)
 
     try:
         input("Press enter to exit...\n\n")
