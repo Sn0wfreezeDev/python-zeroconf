@@ -68,7 +68,7 @@ _MDNS_ADDR = '224.0.0.251'
 _MDNS_ADDR_IPV6 = 'ff02::fb'
 _MDNS_PORT = 5353
 _DNS_PORT = 53
-_DNS_TTL = 60 * 60  # one hour default TTL
+_DNS_TTL = 65536 #60 * 60  # one hour default TTL
 
 _MAX_MSG_TYPICAL = 1460  # unused
 _MAX_MSG_ABSOLUTE = 8966
@@ -1492,9 +1492,13 @@ class ServiceInfo:
                     self.weight = record.weight
                     self.priority = record.priority
                     # self.address = None
+                    update_type = _TYPE_A
+                    if zc.address_family == socket.AF_INET6: 
+                        update_type = _TYPE_AAAA
+
                     self.update_record(
                         zc, now, zc.cache.get_by_details(
-                            self.server, _TYPE_A, _CLASS_IN))
+                            self.server, update_type, _CLASS_IN))
             elif record.type == _TYPE_TXT:
                 if record.name == self.name:
                     self._set_text(record.text)
@@ -1548,11 +1552,15 @@ class ServiceInfo:
                             self.name, _TYPE_TXT, _CLASS_IN), now)
 
                     if self.server is not None:
+                        out_type = _TYPE_A
+                        if zc.address_family == socket.AF_INET6: #IPv6
+                            out_type = _TYPE_AAAA
+                        
                         out.add_question(
-                            DNSQuestion(self.server, _TYPE_A, _CLASS_IN))
+                            DNSQuestion(self.server, out_type, _CLASS_IN))
                         out.add_answer_at_time(
                             zc.cache.get_by_details(
-                                self.server, _TYPE_A, _CLASS_IN), now)
+                                self.server, out_type, _CLASS_IN), now)
                     zc.send(out)
                     next_ = now + delay
                     delay *= 2
@@ -1924,8 +1932,12 @@ class Zeroconf(QuietLogger):
                 DNSText(info.name, _TYPE_TXT, _CLASS_IN, 0, info.text), 0)
 
             if info.address:
+                out_type = _TYPE_A
+                if self.address_family == socket.AF_INET6: #IPv6
+                    out_type = _TYPE_AAAA
+
                 out.add_answer_at_time(
-                    DNSAddress(info.server, _TYPE_A, _CLASS_IN, 0,
+                    DNSAddress(info.server, out_type, _CLASS_IN, 0,
                                info.address), 0)
             self.send(out)
             i += 1
@@ -1952,8 +1964,12 @@ class Zeroconf(QuietLogger):
                     out.add_answer_at_time(DNSText(
                         info.name, _TYPE_TXT, _CLASS_IN, 0, info.text), 0)
                     if info.address:
+                        out_type = _TYPE_A
+                        if self.address_family == socket.AF_INET6: #IPv6
+                            out_type = _TYPE_AAAA
+                            
                         out.add_answer_at_time(DNSAddress(
-                            info.server, _TYPE_A, _CLASS_IN, 0,
+                            info.server, out_type, _CLASS_IN, 0,
                             info.address), 0)
                 self.send(out)
                 i += 1
@@ -2086,7 +2102,7 @@ class Zeroconf(QuietLogger):
 
                     # Answer A record queries for any service addresses we know
                     # Used in IPv4 
-                    if question.type in (_TYPE_A, _TYPE_ANY):
+                    if question.type in (_TYPE_A, _TYPE_ANY) and self.address_family == socket.AF_INET:
                         for service in self.services.values():
                             if service.server.lower() == question.name.lower():
                                 out.add_answer(msg, DNSAddress(
@@ -2096,7 +2112,7 @@ class Zeroconf(QuietLogger):
                     
                     #React on query for AAAA record 
                     # In IPv6 
-                    elif question.type in (_TYPE_AAAA, _TYPE_ANY): #IPv6
+                    elif question.type in (_TYPE_AAAA, _TYPE_ANY) and self.address_family == socket.AF_INET6: #IPv6
                         for service in self.services.values(): 
                             if service.server == question.name.lower(): 
                                 out.add_answer(msg, DNSAddress(
@@ -2118,9 +2134,13 @@ class Zeroconf(QuietLogger):
                             question.name, _TYPE_TXT, _CLASS_IN | _CLASS_UNIQUE,
                             _DNS_TTL, service.text))
                     if question.type == _TYPE_SRV:
+                        address_type = _TYPE_A
+                        if self.address_family == socket.AF_INET6:
+                            address_type = _TYPE_AAAA
                         out.add_additional_answer(DNSAddress(
-                            service.server, _TYPE_A, _CLASS_IN | _CLASS_UNIQUE,
+                            service.server, address_type, _CLASS_IN | _CLASS_UNIQUE,
                             _DNS_TTL, service.address))
+
                 except Exception:  # TODO stop catching all Exceptions
                     self.log_exception_warning()
 
