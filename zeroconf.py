@@ -114,6 +114,7 @@ _TYPE_TXT = 16
 _TYPE_AAAA = 28
 _TYPE_SRV = 33
 _TYPE_ANY = 255
+_TYPE_NSEC = 47
 
 # Mapping constants to names
 
@@ -1738,12 +1739,14 @@ class Zeroconf(QuietLogger):
         self,
         interfaces=InterfaceChoice.All,
         ipv6_interface_name=None,
+        apple_mdns=False,
     ):
         """Creates an instance of the Zeroconf class, establishing
         multicast communications, listening and reaping threads.
 
         :type interfaces: :class:`InterfaceChoice` or sequence of ip addresses
         :param ipv6_interface_name: string defining the name of the IPv6 interface that should be used. None if IPv4 should be used
+        :param apple_mdns: For Apple's mdns services._dns-sd._udp.local. has to be included in an answer
         """
         # hook for threads
         self._GLOBAL_DONE = False
@@ -1755,6 +1758,8 @@ class Zeroconf(QuietLogger):
             self.if_index = socket.if_nametoindex(ipv6_interface_name)
             self._listen_socket = new_socket(interface_number=self.if_index, interface_name=ipv6_interface_name)
             self.address_family = socket.AF_INET6
+
+        self.apple_mdns = apple_mdns
             
         interfaces = normalize_interface_choice(interfaces, self.address_family, ipv6_interface_name)
 
@@ -2080,6 +2085,7 @@ class Zeroconf(QuietLogger):
                 out.add_question(question)
 
         for question in msg.questions:
+            # print(question.name)
             if question.type == _TYPE_PTR:
                 if question.name == "_services._dns-sd._udp.local.":
                     for stype in self.servicetypes.keys():
@@ -2095,6 +2101,12 @@ class Zeroconf(QuietLogger):
                         out.add_answer(msg, DNSPointer(
                             service.type, _TYPE_PTR,
                             _CLASS_IN, _DNS_TTL, service.name))
+                    
+                    if self.apple_mdns and not out is None: 
+                        for stype in self.servicetypes.keys():
+                            out.add_answer(msg, DNSPointer(
+                                "_services._dns-sd._udp.local.", _TYPE_PTR,
+                                _CLASS_IN, _DNS_TTL, stype))
             else:
                 try:
                     if out is None:
@@ -2219,7 +2231,8 @@ if __name__=='__main__':
     # Normal ipv4 
     # ip_addr =  netifaces.ifaddresses(ifname)[socket.AF_INET][0]['addr']
 
-    z = Zeroconf(interfaces=[ip6_addr], ipv6_interface_name=ifname)
+    # z = Zeroconf(interfaces=[ip6_addr], ipv6_interface_name=ifname, apple_mdns=True)
+    z = Zeroconf()
     #IPv4
     # zeroconf = Zeroconf(interfaces=[ip_addr])
 
@@ -2233,15 +2246,17 @@ if __name__=='__main__':
             print("Service %s added, service info: %s" % (name, info))
 
 
-    listener = MyListener()
-    browser = ServiceBrowser(z, "_airdrop._tcp.local.", listener)
+    # listener = MyListener()
+    # browser = ServiceBrowser(z, "_airdrop._tcp.local.", listener)
 
     #Announce a service 
     service_name = '910d8e8bf1d9' + "._airdrop._tcp.local."
-    byte_address = b'\xfe\x80\x00\x00\x00\x00\x00\x00(\xb0\xac\xff\xfeq\xee\xd7'
+    # byte_address = b'\xfe\x80\x00\x00\x00\x00\x00\x00(\xb0\xac\xff\xfeq\xee\xd7'
+    byte_address = b'\xc0\xa8\xb2\x1d'
     port = 8771
     server = "AirDropPy" + ".local."
-    properties = {b'flags': b'503'}
+    # properties = {b'flags': b'251'}
+    properties = {b'flags': b'225', b'phash': b'NMDuJMTtLQposmbcwjutfKj8sCM=', b'nhash': False, b'ehash': b'oN8V1lARzitXzpE/nGk/CcFDztQ=,znsDYNoBF3dm+LBxvTSQCaOuCdk=,ssgoJtHwU/Gm0ENXNzwLXRfTdEo=', b'cname': 'AirDropPy'.encode("utf-8")}
     info = ServiceInfo(
             "_airdrop._tcp.local.", service_name,
             byte_address, port, 0, 0, properties, server)
