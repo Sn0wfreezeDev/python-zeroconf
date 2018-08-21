@@ -28,6 +28,7 @@ import select
 import socket
 import struct
 import sys
+import platform
 import threading
 import time
 from functools import reduce
@@ -1715,7 +1716,7 @@ def new_socket(interface_number=None, interface_name=None):
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
 
-    if interface_name is "awdl0":
+    if interface_name is "awdl0" and platform.system() == 'Darwin': :
         s.setsockopt(socket.SOL_SOCKET, 0x1104, 1)
 
     #Bind the Socket
