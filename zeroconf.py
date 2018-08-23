@@ -1764,7 +1764,7 @@ class Zeroconf(QuietLogger):
             
         interfaces = normalize_interface_choice(interfaces, self.address_family, ipv6_interface_name)
 
-        print("Interfaces", interfaces)
+        # print("Interfaces", interfaces)
 
         self._respond_sockets = []
 
